@@ -1,0 +1,216 @@
+---
+title: "Porto Seguro Kaggle"
+author: "Pedro Braun"
+date: "November 2, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(dplyr)
+require(partykit)
+require(car)
+require(ROCR)
+require(data.table)
+```
+
+```{r UseFunction, include=FALSE}
+curva_roc <- function(var_score,var_real){
+  
+  ScoredBag <- prediction(var_score,var_real)
+  perf.model <- performance(ScoredBag, measure = "tpr", x.measure = "fpr")
+
+  cutoff.matrix <- data.frame(cut = perf.model@alpha.values[[1]],fpr=perf.model@x.values[[1]],tpr=perf.model@y.values[[1]])
+  cutoff.matrix <- cutoff.matrix[order(cutoff.matrix$cut,decreasing = TRUE),]
+  
+  #CUrva ROC
+  par(mar=c(5,5,2,2),xaxs = "i",yaxs = "i",cex.axis=1.3,cex.lab=1.4)
+  plot(perf.model,col="black",lty=3, lwd=3)
+  auc <- performance(ScoredBag,"auc")
+  # now converting S4 class to vector
+  auc <- unlist(slot(auc, "y.values"))
+  # adding min and max ROC AUC to the center of the plot
+  minauc<-min(round(auc, digits = 2))
+  maxauc<-max(round(auc, digits = 2))
+  minauct <- paste(c("min(AUC)  = "),minauc,sep="")
+  maxauct <- paste(c("max(AUC) = "),maxauc,sep="")
+  legend(0.3,0.6,c(minauct,maxauct,"\n"),border="white",cex=1.7,box.col = "white")
+}
+
+gini_auc <- function(var_score,var_real){
+  ScoredBag <- prediction(var_score,var_real)
+  perf.model <- performance(ScoredBag, measure = "tpr", x.measure = "fpr")
+  
+  nobs = length(var_real)
+  nevents = length(var_real[var_real == 1])
+  
+  cat("\n")
+  cat("Gini(ROCR): ", (2*(as.numeric(performance(ScoredBag,"auc")@y.values)) -1))
+  #ROC
+  cat("\n")
+  cat("AUC(ROCR): ", as.numeric(performance(ScoredBag,"auc")@y.values))
+  #KS
+  cat("\n")
+  cat("Kolmogorov-Smirnov: ", as.numeric(max(attr(perf.model,'y.values')[[1]]-attr(perf.model,'x.values')[[1]])))
+  cat("\n")
+  cat("# Observations: ", as.numeric(nobs))
+  cat("\n")
+  cat("# Events: ", as.numeric(nevents))
+  cat("\n")
+  cat("% Events: ", as.numeric(nevents/nobs))
+  cat("\n")
+}
+
+Modeling.Set <- read.csv("C:/Users/Pedro Braun/Documents/Kaggle/Porto Seguro/train.csv")
+Modeling.Set$target <- as.factor(Modeling.Set$target)
+
+Out.Set <- read.csv("C:/Users/Pedro Braun/Documents/Kaggle/Porto Seguro/test.csv")
+```
+
+```{r Boosting Functions}
+yada.set <- Modeling.Set %>% select(-id)
+
+set.seed(42)
+
+nobs <- nrow(yada.set)
+
+Prior <- Modeling.Set$target %>% as.numeric %>% mean-1
+yada.set$D <- 1/nobs
+
+yada.set$Predicted <- 0
+
+niter = 9
+for(k in 1:niter){
+  yada.set$weight <- round(100*nobs*yada.set$D,0)
+  
+  New.Tree <- partykit::ctree( target ~
+                                 ps_ind_01 + ps_ind_02_cat + ps_ind_03 + ps_ind_04_cat +
+                                 ps_ind_05_cat + ps_ind_06_bin + ps_ind_07_bin + ps_ind_08_bin +
+                                 ps_ind_09_bin + ps_ind_10_bin + ps_ind_11_bin + ps_ind_12_bin +
+                                 ps_ind_13_bin + ps_ind_14 + ps_ind_15 + ps_ind_16_bin + ps_ind_17_bin +
+                                 ps_ind_18_bin + ps_reg_01 + ps_reg_02 + ps_reg_03 + ps_car_01_cat +
+                                 ps_car_02_cat + ps_car_03_cat + ps_car_04_cat + ps_car_05_cat +
+                                 ps_car_06_cat + ps_car_07_cat + ps_car_08_cat + ps_car_09_cat +
+                                 ps_car_10_cat + ps_car_11_cat + ps_car_11 + ps_car_12 + ps_car_13 +
+                                 ps_car_14 + ps_car_15 + ps_calc_01 + ps_calc_02 + ps_calc_03 +
+                                 ps_calc_04 + ps_calc_05 + ps_calc_06 + ps_calc_07 + ps_calc_08 +
+                                 ps_calc_09 + ps_calc_10 + ps_calc_11 + ps_calc_12 + ps_calc_13 +
+                                 ps_calc_14 + ps_calc_15_bin + ps_calc_16_bin + ps_calc_17_bin +
+                                 ps_calc_18_bin + ps_calc_19_bin + ps_calc_20_bin,
+                              data = yada.set,
+                              weights = weight,
+                              control = ctree_control(minbucket = round(nrow(yada.set)/20),
+                                                      maxdepth = 5,
+                                                      mincriterion = 0.99))
+
+
+  yada.set$response <- ifelse(predict(New.Tree, yada.set, type = "prob")[,2] >= Prior,1,0)
+
+  yada.set$err <- ifelse(yada.set$response == yada.set$target, 0,1)
+
+  errt <- mean(yada.set$err)
+
+  alpha <- 0.5*log((1-errt)/errt)
+  
+  print(alpha)
+  
+  
+  column.list <- colnames(yada.set)
+  yada.set <- data.frame(yada.set, 2*(yada.set$response-.5), 2*alpha*(yada.set$response-.5))
+  colnames(yada.set) <- c(column.list,paste("response", k, sep = "_"),paste("iteration", k, sep = "_"))
+  
+  vec <- (-alpha*2*(.5-yada.set$err)) %>% exp
+  
+  yada.set$Predicted <- yada.set$Predicted + yada.set[[paste("iteration", k, sep = "_")]]
+  yada.set$D <- yada.set$D*vec
+  yada.set$D <- yada.set$D/sum(yada.set$D)
+  
+  ### Applying the decision trees to the test data set
+  column.list <- colnames(Out.Set)
+  Out.Set$response <- ifelse(predict(New.Tree, Out.Set, type = "prob")[,2] >= Prior,1,-1)
+  colnames(Out.Set) <- c(column.list,paste("response", k, sep = "_"))
+  
+}
+
+```
+
+```{r Gradient Boosting}
+
+niter = 9
+
+yada.set$DV <- yada.set$target
+for(k in 1:niter){
+  nu.Prior <- mean(as.numeric(yada.set$DV))-1
+  New.Tree <- partykit::ctree( target ~
+                                 ps_ind_01 + ps_ind_02_cat + ps_ind_03 + ps_ind_04_cat +
+                                 ps_ind_05_cat + ps_ind_06_bin + ps_ind_07_bin + ps_ind_08_bin +
+                                 ps_ind_09_bin + ps_ind_10_bin + ps_ind_11_bin + ps_ind_12_bin +
+                                 ps_ind_13_bin + ps_ind_14 + ps_ind_15 + ps_ind_16_bin + ps_ind_17_bin +
+                                 ps_ind_18_bin + ps_reg_01 + ps_reg_02 + ps_reg_03 + ps_car_01_cat +
+                                 ps_car_02_cat + ps_car_03_cat + ps_car_04_cat + ps_car_05_cat +
+                                 ps_car_06_cat + ps_car_07_cat + ps_car_08_cat + ps_car_09_cat +
+                                 ps_car_10_cat + ps_car_11_cat + ps_car_11 + ps_car_12 + ps_car_13 +
+                                 ps_car_14 + ps_car_15 + ps_calc_01 + ps_calc_02 + ps_calc_03 +
+                                 ps_calc_04 + ps_calc_05 + ps_calc_06 + ps_calc_07 + ps_calc_08 +
+                                 ps_calc_09 + ps_calc_10 + ps_calc_11 + ps_calc_12 + ps_calc_13 +
+                                 ps_calc_14 + ps_calc_15_bin + ps_calc_16_bin + ps_calc_17_bin +
+                                 ps_calc_18_bin + ps_calc_19_bin + ps_calc_20_bin,
+                              data = yada.set,
+                              weights = weight,
+                              control = ctree_control(minbucket = round(nrow(yada.set)/20),
+                                                      maxdepth = 5,
+                                                      mincriterion = 0.99))
+
+
+  yada.set$response <- ifelse(predict(New.Tree, yada.set, type = "prob")[,2] >= nu.Prior,1,0)
+
+  yada.set$err <- ifelse(yada.set$response == yada.set$target, 0,1)
+
+  mean(yada.set$err)
+  
+  column.list <- colnames(yada.set)
+  yada.set <- data.frame(yada.set, yada.set$response)
+  colnames(yada.set) <- c(column.list,paste("Gradient", k, sep = "_"))
+  
+  yada.set$DV <- yada.set$err
+  
+  
+  ### Applying the decision trees to the test data set
+  column.list <- colnames(Out.Set)
+  Out.Set$response <- ifelse(predict(New.Tree, Out.Set, type = "prob")[,2] >= Prior,1,-1)
+  colnames(Out.Set) <- c(column.list,paste("response", k, sep = "_"))
+  
+}
+
+```
+
+
+```{r import and prepare data}
+
+glm.result <- glm(target ~ 
+                    response_1 + response_2 + response_3 + 
+                    response_5 + 
+                    response_8 +
+                    response_6
+                    # + response_4
+                    ,
+                  family=binomial(link='logit'),
+                  data = yada.set)
+
+summary(glm.result)
+
+curva_roc(predict(glm.result,yada.set), yada.set$target)
+gini_auc(predict(glm.result,yada.set), yada.set$target)
+
+```
+
+```{r scoring model}
+
+Out.Set$target <- predict(glm.result, Out.Set, type = "response")
+
+```
+
+```{r output}
+Out.Set %>% 
+  select(id, target) %>% 
+  write.csv(file = "C:/Users/Pedro Braun/Documents/Kaggle/Porto Seguro/Submission.csv", row.names = F)
+```
